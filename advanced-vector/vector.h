@@ -145,7 +145,7 @@ public:
 
     Vector& operator=(Vector&& rhs) noexcept {
         data_ = std::move(rhs.data_);
-        size_ = std::move(rhs.size_);
+        size_ = std::exchange(rhs.size_, 0);
         return *this;
     }
 
@@ -182,10 +182,15 @@ public:
         else {
             RawMemory<T> new_data(size_ == 0 ? 1 : size_ * 2);
             new (new_data + size_) T(std::forward<Args>(args)...);
-            if constexpr (std::is_nothrow_move_constructible_v<T> || !std::is_copy_constructible_v<T>) {
-                std::uninitialized_move_n(data_.GetAddress(), size_, new_data.GetAddress());
-            } else {
-                std::uninitialized_copy_n(data_.GetAddress(), size_, new_data.GetAddress());
+            try {
+                if constexpr (std::is_nothrow_move_constructible_v<T> || !std::is_copy_constructible_v<T>) {
+                    std::uninitialized_move_n(data_.GetAddress(), size_, new_data.GetAddress());
+                } else {
+                    std::uninitialized_copy_n(data_.GetAddress(), size_, new_data.GetAddress());
+                }
+            } catch (...) {
+                Destroy(new_data + size_);
+                throw;
             }
             std::destroy_n(data_.GetAddress(), size_);
             data_.Swap(new_data);
@@ -241,6 +246,7 @@ public:
 
     template <typename... Args>
     iterator Emplace(const_iterator pos, Args&&... args) {
+        assert((pos <= data_ + size_) && (pos >= data_.GetAddress()));
         if (size_ == 0) {
             data_ = RawMemory<T>(1);
             new (data_.GetAddress()) T(std::forward<Args>(args)...);
@@ -249,10 +255,20 @@ public:
         }
         size_t dist = std::distance(cbegin(), pos);
         if (size_ < Capacity()) {
-            T tmp_val(std::forward<Args>(args)...);
-            new (data_ + size_) T(std::move(data_[size_ - 1])); 
-            std::move_backward(begin() + dist, end() - 1, begin() + size_);
-            data_[dist] = std::move(tmp_val);
+            if (dist == size_) {
+                new (data_ + size_) T(std::forward<Args>(args)...);
+            }
+            else {
+                T tmp_val(std::forward<Args>(args)...);
+                new (data_ + size_) T(std::move(data_[size_ - 1]));
+                try { 
+                    std::move_backward(begin() + dist, end() - 1, begin() + size_);
+                } catch (...) {
+                    Destroy(data_ + size_);
+                    throw;
+                }
+                data_[dist] = std::move(tmp_val);
+            }
         }
         else {
             RawMemory<T> new_data(size_ ? size_ * 2 : 1);
@@ -285,6 +301,7 @@ public:
     }
 
     iterator Erase(const_iterator pos) {
+        assert((pos <= data_ + size_) && (pos >= data_.GetAddress()));
         size_t dist = std::distance(cbegin(), pos);
         std::move(begin() + dist + 1, end(), begin() + dist);
         Destroy(data_ + size_ - 1);
